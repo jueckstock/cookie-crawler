@@ -1,0 +1,26 @@
+{
+  "name": "cookie-crawler",
+  "version": "1.0.0",
+  "description": "Crawling utilities for the ephemeral frame storage experiment",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jueckstock/cookie-crawler.git"
+  },
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/jueckstock/cookie-crawler/issues"
+  },
+  "homepage": "https://github.com/jueckstock/cookie-crawler#readme",
+  "dependencies": {
+    "am": "^1.0.2",
+    "publicsuffixlist": "^0.3.0",
+    "puppeteer-core": "^5.2.1",
+    "rimraf": "^3.0.2",
+    "xvfb": "^0.4.0"
+  }
+}
