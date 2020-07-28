@@ -1,10 +1,11 @@
 'use strict';
-const pptr = require('puppeteer-core');
+
+
 const am = require('am');
-const rimraf = require('rimraf');
 const PublicSuffixList = require('publicsuffixlist');
-const fs = require('fs/promises');
-const Xvfb = require('xvfb');
+
+const { Session } = require('./lib/launch');
+const utils = require('./lib/utils');
 
 const CHROME_EXE = process.env.CHROME_EXE || '/usr/bin/google-chrome'
 const USE_XVFB = !!process.env.USE_XVFB
@@ -52,30 +53,6 @@ const LinkHarvester = (browser, linkPredicate) => {
     }
 };
 
-const closeOtherPages = async (browser, page) => {
-    const allPages = await browser.pages()
-    const pi = allPages.indexOf(page)
-    if (pi < 0) {
-        throw Error('no such page in browser')
-    }
-    allPages.splice(pi, 1)
-    return Promise.all(allPages.map((p) => p.close()))
-}
-
-// The maximum is exclusive and the minimum is inclusive
-function getRandomInt(min, max) {
-    min = Math.ceil(min)
-    max = Math.floor(max)
-    return Math.floor(Math.random() * (max - min)) + min
-}
-
-function popRandomElement(array) {
-    const ix = getRandomInt(0, array.length);
-    const el = array[ix];
-    array.splice(ix, 1);
-    return el;
-}
-
 const doPathfinderCrawl = async (browser, seedUrl, spiderCount, recordNavUrl) => {
     const harvestLinks = LinkHarvester(browser, SamePublicSuffixPredicate());
     const page = await browser.newPage();
@@ -99,9 +76,9 @@ const doPathfinderCrawl = async (browser, seedUrl, spiderCount, recordNavUrl) =>
             if (availableLinks.length === 0) {
                 throw Error("hey, we ran outta links...");
             }
-            ({ url: navUrl, page } = popRandomElement(availableLinks));
+            ({ url: navUrl, page } = utils.popRandomElement(availableLinks));
         }
-        await closeOtherPages(browser, page);
+        await utils.closeOtherPages(browser, page);
         await page.goto(navUrl, {
             timeout: NAV_TIMEOUT,
             waitUntil: NAV_COMPLETE_EVENT,
@@ -117,45 +94,26 @@ const doPathfinderCrawl = async (browser, seedUrl, spiderCount, recordNavUrl) =>
 const timeoutIn = (ms) => new Promise((resolve, _) => { setTimeout(resolve, ms) });
 
 am(async (seedUrl) => {
-    const tempDir = await fs.mkdtemp("pfc_")
-    process.on('exit', () => {
-        console.error(`wiping out temp dir: ${tempDir}`)
-        rimraf.sync(tempDir)
-    })
 
-    let closeXvfb
+    const session = new Session();
+    session.useBinary(CHROME_EXE).useTempProfile();
+
     if (USE_XVFB) {
-        const xServer = new Xvfb();
-        xServer.startSync()
-        closeXvfb = () => {
-            console.error('tearing down Xvfb')
-            xServer.stopSync()
-        }
-    } else {
-        closeXvfb = () => { }
+        session.useXvfb();
     }
 
-    const browser = await pptr.launch({
-        executablePath: CHROME_EXE,
-        defaultViewport: null,
-        userDataDir: tempDir,
-        headless: false,
-    })
-
-    try {
+    let exitStatus = 0;
+    await session.run(async (browser) => {
         await Promise.race([
             doPathfinderCrawl(browser, seedUrl, SPIDER_LINKS, (url) => {
                 console.log(url);
             }),
             timeoutIn(MAX_CRAWL_TIME),
-        ]);
-    } catch (err) {
-        console.error("crawl error:", err);
-    } finally {
-        await browser.close().catch(err => console.error("browser shutdown error:", err));
-        try {
-            closeXvfb()
-        } catch { }
-        process.exit();
-    }
+        ])
+    }).catch(err => {
+        console.error("error while browsing:", err);
+        exitStatus = 1;
+    });
+
+    process.exit(exitStatus);
 })
