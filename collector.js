@@ -12,8 +12,8 @@ const PROFILE_DIR = process.env.PROFILE_DIR || false;
 const USE_XVFB = !!process.env.USE_XVFB
 const HTTP_PROXY = process.env.HTTP_PROXY || undefined;
 
-const NAV_TIMEOUT = 30.0 * 1000
-const NAV_COMPLETE_EVENT = 'networkidle2'
+const NAV_TIMEOUT = 5.0 * 1000
+const NAV_COMPLETE_EVENT = 'load'
 
 
 class RawRequest {
@@ -115,67 +115,81 @@ const MetricsCollector = async (browser) => {
         getFrameMetrics(frame).requests.push(record);
     };
 
+    const rt = new RequestTracker();
+    rt.on('request', (request) => {
+        console.log(request.id, request.params.type, JSON.stringify(request.events), request.params.request && request.params.request.url);
+    });
 
-    const instrumentTarget = async (target) => {
-        console.log("new target", target._targetId, target.type());
-        const tcdp = await target.createCDPSession();
+    const sessionSet = new WeakSet();
+    const instrumentSession = async (cdp) => {
+        const sessionId = cdp._sessionId;
+        const targetType = cdp._targetType;
+        if (sessionSet.has(cdp)) {
+            console.log("old session", sessionId, targetType);
+            return;
+        }
+        console.log("new session", sessionId, targetType);
 
-        if (["page", "other"].includes(target.type())) {
-            const rt = new RequestTracker();
-            rt.on('request', (request) => {
-                console.log(request.id, request.params.type, request.params.frameId);
-            });
+        if (["page", "iframe"].includes(targetType)) {
             [
                 'Network.requestWillBeSent',
                 'Network.responseReceived',
                 'Network.loadingFinished',
                 'Network.loadingFailed',
             ].forEach((eventName) => {
-                tcdp.on(eventName, (params) => {
+                cdp.on(eventName, (params) => {
                     rt.update(eventName, params);
                 });
             });
 
-            tcdp.on('Console.messageAdded', (params) => {
-                const { source, level, text, url } = params;
+            cdp.on('Console.messageAdded', (params) => {
+                const { message: { source, level, text, url } } = params;
                 console.log(source, url, level, text);
             });
 
-            tcdp.on('DOM.childNodeInserted', (params) => {
-                const { node } = params;
-                console.log("node", node.frameId, node.nodeName);
+            cdp.on('DOM.insertChildNode', (params) => {
+                console.log("DOM INSERT", params);
             });
+            cdp.on('DOM.documentUpdated', async () => {
+                console.log("DOM UPDATE", await cdp.send('DOM.getDocument', { depth: 1, pierce: true }));
+            })
             await Promise.all([
-                tcdp.send('Network.enable'),
-                tcdp.send('Console.enable'),
-                tcdp.send('DOM.enable'),
-                tcdp.send('Page.enable'),
+                cdp.send('Network.enable'),
+                cdp.send('Console.enable'),
+                cdp.send('DOM.enable'),
+                cdp.send('Page.enable'),
             ]);
         }
-        await tcdp.send('Target.setAutoAttach', {
+        await cdp.send('Target.setAutoAttach', {
             autoAttach: true,
-            waitForDebuggerOnStart: false,
+            waitForDebuggerOnStart: true,
             flatten: true,
         });
-        tcdp.on('Target.attachedToTarget', async (params) => {
-            const { targetInfo } = params;
-            const target = browser._targets.get(targetInfo.targetId);
-            await instrumentTarget(target);
+        cdp.on('Target.attachedToTarget', async (params) => {
+            const { sessionId, targetInfo } = params;
+            console.log("COLLECTOR-DEBUG: Target.attachedToTarget:", sessionId, targetInfo.type, targetInfo.targetId);
+            const cdp = browser._connection._sessions.get(sessionId);
+            await instrumentSession(cdp);
         });
         try {
-            await tcdp.send('Runtime.runIfWaitingForDebugger');
+            await cdp.send('Runtime.runIfWaitingForDebugger');
         } catch { }
-
+        console.log(`DONE INSTRUMENTING SESSION ${sessionId}`)
     };
 
+    const rootSession = await browser.target().createCDPSession();
+    instrumentSession(rootSession);
 
-    browser.on('targetcreated', async (target) => {
-        if (!["page", "other"].includes(target.type())) {
+
+    /*browser.on('targetcreated', async (target) => {
+        const targetType = target._targetInfo.type;
+        const targetId = target._targetId;
+        if (!["page", "iframe"].includes(targetType)) {
             return;
         }
         const rt = new RequestTracker();
         rt.on('request', (request) => {
-            console.log(target.type(), request.id, request.params);
+            console.log(targetType, targetId, request.id, request.params.type, JSON.stringify(request.events), request.params.request && request.params.request.url);
         });
 
         const cdp = await target.createCDPSession();
@@ -207,9 +221,20 @@ const MetricsCollector = async (browser) => {
             cdp.send('Page.enable'),
             cdp.send('Log.enable'),
         ]);
-    });
+        console.log(`DONE INSTRUMENTING TARGET ${target._targetId}`)
+    });*/
 
-    //instrumentTarget(browser.target());
+    /*browser.on('targetcreated', async (target) => {
+        if (target.type() !== "page") {
+            console.log(`skipping target of type ${target.type()}`);
+            return;
+        }
+
+        const page = await target.page();
+        page.on('requestfinished', logRequest);
+        page.on('requestfailed', logRequest);
+        console.log(`instrumented requests on page ${target._targetId}`)
+    });*/
 
     return () => {
         const oldResults = frameMetricsMap;
@@ -243,6 +268,7 @@ am(async (...urls) => {
 
             for (const url of urls) {
                 await utils.closeOtherPages(browser, page);
+                console.log(`navigating ${page.target()._targetId} to ${url}`);
                 await page.goto(url, {
                     timeout: NAV_TIMEOUT,
                     waitUntil: NAV_COMPLETE_EVENT,
@@ -261,6 +287,8 @@ am(async (...urls) => {
                     }
                 }
             }
+
+            await utils.timeoutIn(60 * 1000);
         });
     } catch (err) {
         console.error("error while browsing:", err);
